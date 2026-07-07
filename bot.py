@@ -23,7 +23,10 @@ cursor = conn.cursor()
 cursor.execute(
     """
     CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY
+        user_id INTEGER PRIMARY KEY,
+        full_name TEXT,
+        username TEXT,
+        joined_at TEXT
     )
     """
 )
@@ -38,14 +41,28 @@ cursor.execute(
 conn.commit()
 
 
-def add_user(user_id: int) -> None:
-    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+def add_user(user_id: int, full_name: str = "", username: str = "") -> None:
+    cursor.execute(
+        """
+        INSERT INTO users (user_id, full_name, username, joined_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET
+            full_name = excluded.full_name,
+            username = excluded.username
+        """,
+        (user_id, full_name, username),
+    )
     conn.commit()
 
 
 def get_all_users() -> list[int]:
     cursor.execute("SELECT user_id FROM users")
     return [row[0] for row in cursor.fetchall()]
+
+
+def get_all_users_info() -> list[tuple]:
+    cursor.execute("SELECT user_id, full_name, username, joined_at FROM users ORDER BY joined_at DESC")
+    return cursor.fetchall()
 
 
 def count_users() -> int:
@@ -70,7 +87,11 @@ def get_client_by_forward(admin_msg_id: int) -> int | None:
 # ---------- Foydalanuvchi buyruqlari ----------
 @dp.message(CommandStart())
 async def start_handler(message: Message):
-    add_user(message.from_user.id)
+    add_user(
+        message.from_user.id,
+        message.from_user.full_name or "",
+        message.from_user.username or "",
+    )
     await message.answer(
         "Xush kelibsiz! ✅\n"
         "Siz ro'yxatdan muvaffaqiyatli o'tdingiz.\n"
@@ -84,6 +105,28 @@ async def stats_handler(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     await message.answer(f"📊 Ro'yxatdan o'tgan foydalanuvchilar: {count_users()}")
+
+
+@dp.message(Command("users"))
+async def users_handler(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    users = get_all_users_info()
+    if not users:
+        await message.answer("Hozircha hech kim ro'yxatdan o'tmagan.")
+        return
+
+    lines = [f"👥 Jami: {len(users)} kishi\n"]
+    for user_id, full_name, username, joined_at in users:
+        name = full_name or "Ism yo'q"
+        uname = f"@{username}" if username else "username yo'q"
+        lines.append(f"• {name} ({uname}) — ID: {user_id}")
+
+    # Telegram xabar uzunligi cheklangani uchun 4000 belgidan bo'lib yuboramiz
+    text = "\n".join(lines)
+    for i in range(0, len(text), 4000):
+        await message.answer(text[i:i + 4000])
 
 
 @dp.message(Command("reklama"))
@@ -174,6 +217,11 @@ async def message_router(message: Message):
 
     # 3) Oddiy mijozdan (admin bo'lmagan, shaxsiy chatdan) kelgan xabar - adminga yuboriladi
     if message.from_user.id != ADMIN_ID and message.chat.type == "private":
+        add_user(
+            message.from_user.id,
+            message.from_user.full_name or "",
+            message.from_user.username or "",
+        )
         forwarded = await bot.forward_message(
             chat_id=ADMIN_ID,
             from_chat_id=message.chat.id,
