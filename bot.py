@@ -27,6 +27,14 @@ cursor.execute(
     )
     """
 )
+cursor.execute(
+    """
+    CREATE TABLE IF NOT EXISTS forward_map (
+        admin_msg_id INTEGER PRIMARY KEY,
+        user_id INTEGER
+    )
+    """
+)
 conn.commit()
 
 
@@ -43,6 +51,20 @@ def get_all_users() -> list[int]:
 def count_users() -> int:
     cursor.execute("SELECT COUNT(*) FROM users")
     return cursor.fetchone()[0]
+
+
+def save_forward(admin_msg_id: int, user_id: int) -> None:
+    cursor.execute(
+        "INSERT OR REPLACE INTO forward_map (admin_msg_id, user_id) VALUES (?, ?)",
+        (admin_msg_id, user_id),
+    )
+    conn.commit()
+
+
+def get_client_by_forward(admin_msg_id: int) -> int | None:
+    cursor.execute("SELECT user_id FROM forward_map WHERE admin_msg_id = ?", (admin_msg_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 # ---------- Foydalanuvchi buyruqlari ----------
@@ -113,31 +135,59 @@ async def broadcast_handler(message: Message):
     await message.answer(f"✅ Yuborildi: {success}\n❌ Yuborilmadi: {failed}")
 
 
-# ---------- Guruhga yozilgan HAR QANDAY xabarni avtomatik hammaga jo'natish ----------
+# ---------- Uchta holatni boshqaruvchi umumiy handler ----------
 @dp.message()
-async def group_auto_broadcast(message: Message):
-    """
-    GROUP_ID sifatida ko'rsatilgan guruhga yozilgan har qanday xabar
-    (matn, rasm, video, fayl - hammasi) avtomatik ravishda barcha
-    ro'yxatdan o'tgan mijozlarga jo'natiladi. Hech qanday buyruq
-    yozish shart emas - guruhga yozdingiz, hammaga ketdi.
-    """
-    if message.chat.id != GROUP_ID:
+async def message_router(message: Message):
+    # 1) Reklama guruhiga yozilgan HAR QANDAY xabar - avtomatik hammaga jo'natiladi
+    if message.chat.id == GROUP_ID:
+        if message.text and message.text.startswith("/"):
+            return  # buyruqlarni e'tiborsiz qoldiramiz
+        users = get_all_users()
+        for user_id in users:
+            try:
+                await bot.copy_message(
+                    chat_id=user_id,
+                    from_chat_id=message.chat.id,
+                    message_id=message.message_id,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
         return
-    if message.text and message.text.startswith("/"):
-        return  # buyruqlarni (masalan /stats) e'tiborsiz qoldiramiz
 
-    users = get_all_users()
-    for user_id in users:
-        try:
-            await bot.copy_message(
-                chat_id=user_id,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
-            )
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
+    # 2) Admin biror mijoz xabariga JAVOB (reply) yozsa - javob o'sha mijozga ketadi
+    if message.from_user.id == ADMIN_ID and message.reply_to_message:
+        client_id = get_client_by_forward(message.reply_to_message.message_id)
+        if client_id:
+            try:
+                await bot.copy_message(
+                    chat_id=client_id,
+                    from_chat_id=message.chat.id,
+                    message_id=message.message_id,
+                )
+                await message.reply("✅ Javobingiz mijozga yuborildi")
+            except Exception:
+                await message.reply(
+                    "❌ Yuborib bo'lmadi (mijoz botni bloklagan bo'lishi mumkin)"
+                )
+            return
+
+    # 3) Oddiy mijozdan (admin bo'lmagan, shaxsiy chatdan) kelgan xabar - adminga yuboriladi
+    if message.from_user.id != ADMIN_ID and message.chat.type == "private":
+        forwarded = await bot.forward_message(
+            chat_id=ADMIN_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+        save_forward(forwarded.message_id, message.from_user.id)
+        info_msg = await bot.send_message(
+            ADMIN_ID,
+            f"👆 Yuqoridagi xabar shu mijozdan:\n"
+            f"{message.from_user.full_name} (ID: {message.from_user.id})\n\n"
+            f"Javob berish uchun shu xabarga (yoki yuqoridagisiga) JAVOB (reply) qilib yozing.",
+        )
+        save_forward(info_msg.message_id, message.from_user.id)
+        return
 
 
 async def main():
